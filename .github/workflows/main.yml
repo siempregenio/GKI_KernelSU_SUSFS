@@ -33,6 +33,7 @@ on:
           - 5.15.x-android13
           - 5.15.x-android14
           - 6.1.x-android14
+          - 6.1.x-android17
           - 6.6.x-android15
           - 6.12.x-android16
           - 6.18.x-android17
@@ -517,3 +518,147 @@ jobs:
               done
             )
           done
+
+  # Pixel 9 Pro XL (komodo), Android 17, Linux/GKI 6.1.
+  #
+  # IMPORTANT:
+  # The user-facing selector is Android 17 / 6.1, but the underlying GKI
+  # source/config is android14-6.1. Do not change the config version to
+  # android17-6.1: the generic Google GKI manifest does not provide a
+  # common-android17-6.1 branch.
+  build-android17-6-1:
+    needs:
+      - resolve-sources
+    if: "github.event_name == 'workflow_dispatch' && !inputs.test_release_notes && inputs.kernel_build_version == '6.1.x-android17'"
+    strategy:
+      fail-fast: false
+      matrix:
+        root: ${{ fromJson(needs.resolve-sources.outputs.root_matrix) }}
+    uses: ./.github/workflows/prepare.yml
+    with:
+      # Android 17 on this device is built against the existing 6.1 GKI
+      # source family. The config itself is named android17-6.1 for clarity,
+      # but its internal version MUST remain android14-6.1.
+      config_file: .github/config/android17-6.1.json
+      feature_set: ${{ needs.resolve-sources.outputs.feature_set }}
+      susfs_commit: ${{ matrix.root.root_flavor == 'resukisu' && needs.resolve-sources.outputs.susfs_commit_android14_6_1_resukisu || (matrix.root.root_flavor == 'sukisu-ultra' && needs.resolve-sources.outputs.susfs_commit_android14_6_1_sukisu_ultra || needs.resolve-sources.outputs.susfs_commit_android14_6_1) }}
+      nomount_commit: ${{ needs.resolve-sources.outputs.nomount_commit }}
+      kernel_patches_commit: ${{ needs.resolve-sources.outputs.kernel_patches_commit }}
+      root_flavor: ${{ matrix.root.root_flavor }}
+      root_commit: ${{ matrix.root.root_commit }}
+      variant: ${{ matrix.root.variant }}
+      ksu_branch: ${{ needs.resolve-sources.outputs.kernelsu_commit }}
+      anykernel3_commit: ${{ needs.resolve-sources.outputs.anykernel3_commit }}
+      droidspaces_commit: ${{ needs.resolve-sources.outputs.droidspaces_commit }}
+      brand_name: ${{ inputs.brand_name }}
+      os_patch_level: ${{ inputs.os_patch_level }}
+      bypass: ${{ inputs.bypass }}
+      use_cache: ${{ inputs.use_cache }}
+    secrets: inherit
+
+  # Publish only the artifacts produced by the Android 17 / 6.1 build above.
+  # Action = Actions artifacts only.
+  # Pre-Release = GitHub prerelease.
+  # Release = normal GitHub release.
+  release-android17-6-1:
+    needs:
+      - resolve-sources
+      - build-android17-6-1
+    if: "github.event_name == 'workflow_dispatch' && !inputs.test_release_notes && (inputs.release_type == 'Release' || inputs.release_type == 'Pre-Release') && inputs.kernel_build_version == '6.1.x-android17' && needs.build-android17-6-1.result == 'success'"
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+      actions: read
+    env:
+      GH_TOKEN: ${{ github.token }}
+    steps:
+      - name: Download AnyKernel3 artifacts
+        uses: actions/download-artifact@v7
+        with:
+          path: release-assets
+          pattern: '6.1.*-android14-*-AnyKernel3'
+          merge-multiple: false
+          if-no-files-found: error
+
+      - name: Repack AnyKernel3 artifacts as release ZIPs
+        shell: bash
+        run: |
+          set -euo pipefail
+          shopt -s nullglob
+          found=0
+
+          for dir in release-assets/*-AnyKernel3; do
+            [ -d "$dir" ] || continue
+            found=1
+            zip_name="${dir}.zip"
+            rm -f "$zip_name"
+            (
+              cd "$dir"
+              zip -r -q -9 "../$(basename "$zip_name")" .
+            )
+          done
+
+          if [ "$found" -eq 0 ]; then
+            echo "ERROR: no AnyKernel3 artifact directories were downloaded." >&2
+            find release-assets -maxdepth 3 -print >&2 || true
+            exit 1
+          fi
+
+          echo "Release ZIPs:"
+          find release-assets -maxdepth 2 -type f -name '*.zip' -print
+
+      - name: Verify release assets
+        shell: bash
+        run: |
+          set -euo pipefail
+          count="$(find release-assets -maxdepth 2 -type f -name '*.zip' | wc -l)"
+          echo "Found ${count} release ZIP(s)."
+          test "$count" -gt 0
+
+      - name: Create GitHub Release
+        env:
+          RELEASE_TYPE: ${{ inputs.release_type }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          shopt -s nullglob
+
+          TAG="android17-6.1-${GITHUB_RUN_ID}"
+          TITLE="Pixel 9 Pro XL (komodo) — Android 17 / 6.1 — CP3A.260905.009"
+
+          NOTES="$(mktemp)"
+          cat > "$NOTES" <<'EOF'
+          # Pixel 9 Pro XL — Android 17 / kernel 6.1
+
+          Device: `komodo`
+          Firmware: `CP3A.260905.009`
+          Kernel family: `6.1`
+          Android: `17`
+
+          This release was produced by the GitHub Actions build workflow with
+          the selected KernelSU/root implementation and SUSFS settings.
+          EOF
+
+          args=(--title "$TITLE" --notes-file "$NOTES" --target "$GITHUB_SHA")
+          if [ "$RELEASE_TYPE" = "Pre-Release" ]; then
+            args+=(--prerelease)
+          fi
+
+          if gh release view "$TAG" >/dev/null 2>&1; then
+            gh release edit "$TAG" --title "$TITLE" --notes-file "$NOTES"
+          else
+            gh release create "$TAG" "${args[@]}"
+          fi
+
+          failed=0
+          for f in release-assets/*-AnyKernel3.zip; do
+            [ -f "$f" ] || continue
+            echo "Uploading: $f"
+            if ! gh release upload "$TAG" "$f" --clobber; then
+              echo "ERROR: failed to upload $f" >&2
+              failed=1
+            fi
+          done
+
+          exit "$failed"
+
