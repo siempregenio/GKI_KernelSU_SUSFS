@@ -672,9 +672,9 @@ jobs:
       run: |
         set -euo pipefail
 
-        # NoMount is optional: only resolve its artifact when requested.
-        # (nomount_commit input is always populated, so feature_set is the
-        # only reliable signal for whether NoMount was integrated.)
+        # NoMount is integrated directly into the kernel tree by
+        # .github/actions/nomount. It does NOT produce a separate
+        # NoMount-Metamodule GitHub Actions artifact.
         NOMOUNT_ENABLED="false"
         if [ "${{ contains(inputs.feature_set, 'NoMount') || inputs.feature_set == 'All' }}" = "true" ]; then
           NOMOUNT_ENABLED="true"
@@ -682,7 +682,7 @@ jobs:
 
         if [ "$NOMOUNT_ENABLED" = "true" ]; then
           METHOD="GKI source build with SHA-pinned root implementation, SUSFS, and NoMount"
-          NOMOUNT_MODULE_COMMIT="${{ inputs.nomount_commit }}"
+          NOMOUNT_MODULE_COMMIT="${NOMOUNT_COMMIT:-${{ inputs.nomount_commit }}}"
         else
           METHOD="GKI source build with SHA-pinned root implementation and SUSFS"
           NOMOUNT_MODULE_COMMIT="N/A"
@@ -731,14 +731,11 @@ jobs:
         read -r kernel_artifact_url kernel_artifact_sha256 < <(
           resolve_artifact "${{ steps.extract.outputs.file_name }}-AnyKernel3"
         )
-        if [ "$NOMOUNT_ENABLED" = "true" ]; then
-          read -r nomount_module_url nomount_module_sha256 < <(
-            resolve_artifact "NoMount-Metamodule"
-          )
-        else
-          nomount_module_url="N/A"
-          nomount_module_sha256="N/A"
-        fi
+
+        # NoMount is built into the kernel; there is no separate
+        # NoMount-Metamodule artifact to resolve.
+        nomount_module_url="N/A"
+        nomount_module_sha256="N/A"
 
         jq -n \
           --arg method "$METHOD" \
@@ -809,8 +806,8 @@ jobs:
           jq -e '
             (.nomount_commit | test("^[0-9a-f]{40}$")) and
             (.nomount_metamodule.commit == .nomount_commit) and
-            (.nomount_metamodule.artifact_url | startswith("https://")) and
-            (.nomount_metamodule.sha256 | test("^sha256:[0-9a-f]{64}$"))
+            (.nomount_metamodule.artifact_url == "N/A") and
+            (.nomount_metamodule.sha256 == "N/A")
           ' "$metadata_file" > /dev/null
         else
           jq -e '
